@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cinematic Particle Interaction</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #ffaa00; font-family: sans-serif; font-size: 20px; pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Loading Particles...</div>
+
+    <!-- 引入 Three.js 和后期处理库 -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // --- 配置参数 ---
+        const CONFIG = {
+            imageURL: 'https://images.unsplash.com/photo-1560167016-016b8c843079?q=80&w=800&auto=format&fit=crop', // 替换为你想要的图片(最好是深色背景或抠图)
+            particleSize: 2.0,
+            threshold: 30, // 像素亮度阈值，越小粒子越多
+            repulsionRadius: 100, // 鼠标排斥范围
+            repulsionStrength: 50, // 排斥力度
+            returnSpeed: 0.08, // 粒子复原速度
+            bloomStrength: 1.5, // 辉光强度
+            bloomRadius: 0.4,
+            bloomThreshold: 0.1
+        };
+
+        let scene, camera, renderer, composer;
+        let particlesGeometry, particlesMesh;
+        let particlesData = []; // 存储粒子物理数据
+        const mouse = new THREE.Vector2(-9999, -9999); // 初始鼠标位置在屏幕外
+
+        init();
+
+        function init() {
+            // 1. 场景初始化
+            scene = new THREE.Scene();
+            
+            // 摄像机设置
+            camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 10000);
+            camera.position.z = 800;
+
+            // 渲染器设置
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            // 2. 加载图片并生成粒子
+            const loader = new THREE.TextureLoader();
+            loader.load(CONFIG.imageURL, (texture) => {
+                createParticlesFromImage(texture.image);
+                document.getElementById('loading').style.display = 'none';
+                animate();
+            });
+
+            // 3. 后期处理 (辉光效果 Bloom)
+            const renderScene = new RenderPass(scene, camera);
+            const bloomPass = new UnrealBloomPass(
+                new THREE.Vector2(window.innerWidth, window.innerHeight),
+                1.5, 0.4, 0.85
+            );
+            bloomPass.threshold = CONFIG.bloomThreshold;
+            bloomPass.strength = CONFIG.bloomStrength;
+            bloomPass.radius = CONFIG.bloomRadius;
+
+            composer = new EffectComposer(renderer);
+            composer.addPass(renderScene);
+            composer.addPass(bloomPass);
+
+            // 4. 事件监听
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('mousemove', onMouseMove);
+        }
+
+        function createParticlesFromImage(image) {
+            // 创建一个临时的 canvas 来读取像素数据
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const width = 400; // 缩放图片宽度以控制性能
+            const scale = width / image.width;
+            const height = image.height * scale;
+            
+            canvas.width = width;
+            canvas.height = height;
+            ctx.drawImage(image, 0, 0, width, height);
+            
+            const imgData = ctx.getImageData(0, 0, width, height);
+            const data = imgData.data;
+
+            const positions = [];
+            const colors = [];
+
+            // 遍历像素
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    const i = (y * width + x) * 4;
+                    const r = data[i];
+                    const g = data[i + 1];
+                    const b = data[i + 2];
+                    const a = data[i + 3];
+
+                    // 只处理非透明且有一定亮度的像素
+                    if (a > 0 && (r + g + b) / 3 > CONFIG.threshold) {
+                        // 计算3D坐标 (居中)
+                        const pX = x - width / 2;
+                        const pY = -(y - height / 2); // Y轴反转
+                        const pZ = 0;
+
+                        positions.push(pX * 2, pY * 2, pZ); // *2 是为了让模型大一点
+                        
+                        // 颜色归一化
+                        const color = new THREE.Color(r/255, g/255, b/255);
+                        colors.push(color.r, color.g, color.b);
+
+                        // 存储每个粒子的初始位置和当前速度
+                        particlesData.push({
+                            ox: pX * 2, // 原始 X (Origin)
+                            oy: pY * 2, // 原始 Y
+                            oz: pZ,     // 原始 Z
+                            vx: 0,      // 速度 X
+                            vy: 0,      // 速度 Y
+                            vz: 0,      // 速度 Z
+                            angle: Math.random() * Math.PI * 2 // 用于待机时的微动
+                        });
+                    }
+                }
+            }
+
+            // 创建 BufferGeometry
+            particlesGeometry = new THREE.BufferGeometry();
+            particlesGeometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            particlesGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+            // 创建材质 (使用点材质)
+            const material = new THREE.PointsMaterial({
+                size: CONFIG.particleSize,
+                vertexColors: true,
+                blending: THREE.AdditiveBlending, // 加法混合，产生发光感
+                depthTest: false,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            particlesMesh = new THREE.Points(particlesGeometry, material);
+            scene.add(particlesMesh);
+        }
+
+        function onMouseMove(event) {
+            // 将鼠标坐标转换为 3D 空间坐标的大致映射
+            // 注意：这里做了一个简单的平面映射，为了更精确可以使用 Raycaster
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (particlesMesh) {
+                updateParticles();
+            }
+
+            // 使用 composer 渲染以包含辉光效果
+            composer.render();
+        }
+
+        function updateParticles() {
+            const positions = particlesGeometry.attributes.position.array;
+            
+            // 将鼠标的归一化坐标转换为大致的场景坐标
+            // Z=0 平面上的投影
+            const vector = new THREE.Vector3(mouse.x, mouse.y, 0.5);
+            vector.unproject(camera);
+            const dir = vector.sub(camera.position).normalize();
+            const distance = -camera.position.z / dir.z;
+            const mousePos = camera.position.clone().add(dir.multiplyScalar(distance));
+
+            for (let i = 0; i < particlesData.length; i++) {
+                const data = particlesData[i];
+                const px = positions[i * 3];
+                const py = positions[i * 3 + 1];
+                const pz = positions[i * 3 + 2];
+
+                // 1. 计算鼠标与粒子的距离
+                const dx = mousePos.x - px;
+                const dy = mousePos.y - py;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                // 2. 交互逻辑：鼠标排斥力
+                if (dist < CONFIG.repulsionRadius) {
+                    const force = (CONFIG.repulsionRadius - dist) / CONFIG.repulsionRadius;
+                    const angle = Math.atan2(dy, dx);
+                    
+                    data.vx -= Math.cos(angle) * force * CONFIG.repulsionStrength * 0.1;
+                    data.vy -= Math.sin(angle) * force * CONFIG.repulsionStrength * 0.1;
+                    data.vz += Math.random() * force * 10; // 增加一点Z轴的爆炸感
+                }
+
+                // 3. 复原逻辑：拉回原始位置
+                // 计算当前位置与原始位置的差距
+                const homeDx = data.ox - px;
+                const homeDy = data.oy - py;
+                const homeDz = data.oz - pz;
+
+                // 施加复原力 (弹簧效果)
+                data.vx += homeDx * CONFIG.returnSpeed;
+                data.vy += homeDy * CONFIG.returnSpeed;
+                data.vz += homeDz * CONFIG.returnSpeed;
+
+                // 4. 待机微动 (Noise) - 让画面看起来像视频里那样在“呼吸”
+                data.vx += Math.sin(Date.now() * 0.001 + data.angle) * 0.02;
+                data.vy += Math.cos(Date.now() * 0.002 + data.angle) * 0.02;
+
+                // 5. 应用摩擦力 (防止粒子永远震荡)
+                data.vx *= 0.85;
+                data.vy *= 0.85;
+                data.vz *= 0.85;
+
+                // 6. 更新位置
+                positions[i * 3] += data.vx;
+                positions[i * 3 + 1] += data.vy;
+                positions[i * 3 + 2] += data.vz;
+            }
+
+            particlesGeometry.attributes.position.needsUpdate = true;
+            
+            // 缓慢旋转整个模型
+            // particlesMesh.rotation.y += 0.001;
+        }
+    </script>
+</body>
+</html>
